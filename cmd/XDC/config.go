@@ -157,6 +157,7 @@ func makeConfigNode(ctx *cli.Context) (*node.Node, XDCConfig) {
 	if ctx.GlobalBool(utils.XDCTestnetFlag.Name) {
 		common.IsTestnet = true
 		common.XRC21IssuerSMC = common.XRC21IssuerSMCTestNet
+		cfg.Eth.NetworkId = 50
 	}
 
 	// Check rollback hash exist.

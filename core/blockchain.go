@@ -580,35 +580,21 @@ func (bc *BlockChain) HasBlock(hash common.Hash, number uint64) bool {
 	return ok
 }
 
-// HasFullState checks if state trie is fully present in the database or not.
-func (bc *BlockChain) HasFullState(block *types.Block) bool {
-	_, err := bc.stateCache.OpenTrie(block.Root())
-	if err != nil {
-		return false
-	}
-	engine, _ := bc.Engine().(*XDPoS.XDPoS)
-	if bc.Config().IsXIPXDCX(block.Number()) && engine != nil && block.NumberU64() > bc.chainConfig.XDPoS.Epoch {
-		tradingService := engine.GetXDCXService()
-		lendingService := engine.GetLendingService()
-		if tradingService != nil && !tradingService.HasTradingState(block) {
-			return false
-		}
-		if lendingService != nil && !lendingService.HasLendingState(block) {
-			return false
-		}
-	}
-	return true
+// HasState checks if state trie is fully present in the database or not.
+func (bc *BlockChain) HasState(hash common.Hash) bool {
+	_, err := bc.stateCache.OpenTrie(hash)
+	return err == nil
 }
 
-// HasBlockAndFullState checks if a block and associated state trie is fully present
+// HasBlockAndState checks if a block and associated state trie is fully present
 // in the database or not, caching it if present.
-func (bc *BlockChain) HasBlockAndFullState(hash common.Hash, number uint64) bool {
+func (bc *BlockChain) HasBlockAndState(hash common.Hash, number uint64) bool {
 	// Check first that the block itself is known
 	block := bc.GetBlock(hash, number)
 	if block == nil {
 		return false
 	}
-	return bc.HasFullState(block)
+	return bc.HasState(block.Root())
 }
 
 // GetBlock retrieves a block from the database by hash and number,
@@ -1191,7 +1177,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			var winner []*types.Block
 
 			parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
-			for !bc.HasFullState(parent) {
+			for !bc.HasState(parent.Root()) {
 				winner = append(winner, parent)
 				parent = bc.GetBlock(parent.ParentHash(), parent.NumberU64()-1)
 			}
@@ -1244,6 +1230,22 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		status, err := bc.WriteBlockWithState(block, receipts, statedb)
 		if err != nil {
 			return i, events, coalescedLogs, err
+		}
+		if bc.chainConfig.XDPoS != nil {
+			c := bc.engine.(*XDPoS.XDPoS)
+			coinbase := c.Signer()
+			// ignore synching block
+			if coinbase != common.HexToAddress("0x0000000000000000000000000000000000000000") {
+				// block signer
+				blockSigner, _ := c.RecoverSigner(block.Header())
+				header := block.Header()
+				validator, _ := c.RecoverValidator(block.Header())
+				ok := c.CheckMNTurn(bc, header, coinbase)
+				// if created block was your turn
+				if blockSigner != coinbase && ok {
+					log.Warn("Missed create block height", "number", block.Number(), "hash", block.Hash(), "m1", blockSigner.Hex(), "m2", validator.Hex())
+				}
+			}
 		}
 		switch status {
 		case CanonStatTy:
@@ -1372,7 +1374,7 @@ func (bc *BlockChain) getResultBlock(block *types.Block, verifiedM2 bool) (*Resu
 		var winner []*types.Block
 
 		parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
-		for !bc.HasFullState(parent) {
+		for !bc.HasState(parent.Root()) {
 			winner = append(winner, parent)
 			parent = bc.GetBlock(parent.ParentHash(), parent.NumberU64()-1)
 		}
@@ -1462,13 +1464,29 @@ func (bc *BlockChain) insertBlock(block *types.Block) ([]interface{}, []*types.L
 	// Write the block to the chain and get the status.
 	bc.chainmu.Lock()
 	defer bc.chainmu.Unlock()
-	if bc.HasBlockAndFullState(block.Hash(), block.NumberU64()) {
+	if bc.HasBlockAndState(block.Hash(), block.NumberU64()) {
 		return events, coalescedLogs, nil
 	}
 	status, err := bc.WriteBlockWithState(block, result.receipts, result.state)
 
 	if err != nil {
 		return events, coalescedLogs, err
+	}
+	if bc.chainConfig.XDPoS != nil {
+		c := bc.engine.(*XDPoS.XDPoS)
+		coinbase := c.Signer()
+		// ignore synching block
+		if coinbase != common.HexToAddress("0x0000000000000000000000000000000000000000") {
+			header := block.Header()
+			// block signer
+			blockSigner, _ := c.RecoverSigner(block.Header())
+			validator, _ := c.RecoverValidator(block.Header())
+			ok := c.CheckMNTurn(bc, header, coinbase)
+			// if created block was your turn
+			if blockSigner != coinbase && ok {
+				log.Warn("Missed create block height", "number", block.Number(), "hash", block.Hash(), "m1", blockSigner.Hex(), "m2", validator.Hex())
+			}
+		}
 	}
 	switch status {
 	case CanonStatTy:
@@ -1917,10 +1935,21 @@ func (bc *BlockChain) UpdateM1() error {
 		return err
 	}
 	opts := new(bind.CallOpts)
-	candidates, err := validator.GetCandidates(opts)
+
+	var candidates []common.Address
+
+	// get candidates from slot of stateDB
+	// if can't get anything, request from contracts
+	stateDB, err := bc.State()
 	if err != nil {
-		return err
+		candidates, err = validator.GetCandidates(opts)
+		if err != nil {
+			return err
+		}
+	} else {
+		candidates = state.GetCandidates(stateDB)
 	}
+
 	var ms []XDPoS.Masternode
 	for _, candidate := range candidates {
 		v, err := validator.GetCandidateCap(opts, candidate)

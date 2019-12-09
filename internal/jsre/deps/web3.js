@@ -5239,6 +5239,10 @@ var blockSignersCall = function (args) {
   return (utils.isString(args[0]) && args[0].indexOf('0x') === 0) ? "eth_getBlockSignersByHash" : "eth_getBlockSignersByNumber";
 };
 
+var stakerROICall = function (args) {
+  return utils.isString(args[0]) && args[0].indexOf('0x') === 0 ? "eth_getStakerROIMasternode" : "eth_getStakerROI";
+};
+
 var blockFinalityCall = function (args) {
   return (utils.isString(args[0]) && args[0].indexOf('0x') === 0) ? "eth_getBlockFinalityByHash" : "eth_getBlockFinalityByNumber";
 };
@@ -5336,6 +5340,16 @@ var methods = function () {
       params: 1,
       inputFormatter: [formatters.inputBlockNumberFormatter],
       outputFormatter: formatters.outputBlockSignersFormatter
+    });
+
+    var getStakerROI = new Method({
+        name: 'getStakerROI',
+        call: stakerROICall,
+        params: 1,
+        inputFormatter: [function(val) {
+            return val ? formatters.inputAddressFormatter(val) : null
+        }],
+        outputFormatter: formatters.formatOutputReal
     });
 
     var getBlockFinality = new Method({
@@ -5486,13 +5500,21 @@ var methods = function () {
       params: 2,
       inputFormatter: [formatters.inputAddressFormatter, formatters.inputEpochNumberFormatter]
     });
+    var getCandidates = new Method({
+        name: 'getCandidates',
+        call: 'eth_getCandidates',
+        params: 1,
+        inputFormatter: [formatters.inputEpochNumberFormatter]
+      });
     return [
         getBalance,
         getStorageAt,
         getCode,
         getBlock,
         getBlockSigners,
+        getStakerROI,
         getBlockFinality,
+        getCandidates,
         getCandidateStatus,
         getUncle,
         getCompilers,

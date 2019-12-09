@@ -34,9 +34,9 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/consensus/XDPoS"
-	"github.com/ethereum/go-ethereum/contracts"
 	contractValidator "github.com/ethereum/go-ethereum/contracts/validator/contract"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -55,7 +55,14 @@ const (
 	statusMasternode = "MASTERNODE"
 	statusSlashed    = "SLASHED"
 	statusProposed   = "PROPOSED"
+	fieldStatus      = "status"
+	fieldCapacity    = "capacity"
+	fieldCandidates  = "candidates"
+	fieldSuccess     = "success"
+	fieldEpoch       = "epoch"
 )
+
+var errEmptyHeader = errors.New("empty header")
 
 // PublicEthereumAPI provides an API to access Ethereum related information.
 // It offers only methods that operate on public data that is freely available to anyone.
@@ -561,6 +568,7 @@ func (s *PublicBlockChainAPI) GetUncleByBlockNumberAndIndex(ctx context.Context,
 
 // GetUncleByBlockHashAndIndex returns the uncle block for the given block hash and index. When fullTx is true
 // all transactions in the block are returned in full detail, otherwise only the transaction hash is returned.
+// DEPRECATED SINCE 1.0
 func (s *PublicBlockChainAPI) GetUncleByBlockHashAndIndex(ctx context.Context, blockHash common.Hash, index hexutil.Uint) (map[string]interface{}, error) {
 	block, err := s.b.GetBlock(ctx, blockHash)
 	if block != nil {
@@ -576,6 +584,7 @@ func (s *PublicBlockChainAPI) GetUncleByBlockHashAndIndex(ctx context.Context, b
 }
 
 // GetUncleCountByBlockNumber returns number of uncles in the block for the given block number
+// DEPRECATED SINCE 1.0
 func (s *PublicBlockChainAPI) GetUncleCountByBlockNumber(ctx context.Context, blockNr rpc.BlockNumber) *hexutil.Uint {
 	if block, _ := s.b.BlockByNumber(ctx, blockNr); block != nil {
 		n := hexutil.Uint(len(block.Uncles()))
@@ -585,6 +594,7 @@ func (s *PublicBlockChainAPI) GetUncleCountByBlockNumber(ctx context.Context, bl
 }
 
 // GetUncleCountByBlockHash returns number of uncles in the block for the given block hash
+// DEPRECATED SINCE 1.0
 func (s *PublicBlockChainAPI) GetUncleCountByBlockHash(ctx context.Context, blockHash common.Hash) *hexutil.Uint {
 	if block, _ := s.b.GetBlock(ctx, blockHash); block != nil {
 		n := hexutil.Uint(len(block.Uncles()))
@@ -651,7 +661,6 @@ func (s *PublicBlockChainAPI) GetBlockFinalityByHash(ctx context.Context, blockH
 		log.Error("Failed to get masternodes", "err", err, "len(masternodes)", len(masternodes))
 		return uint(0), err
 	}
-	fmt.Println("before_calling_into_get_finality ")
 	return s.findFinalityOfBlock(ctx, block, masternodes)
 }
 
@@ -665,7 +674,6 @@ func (s *PublicBlockChainAPI) GetBlockFinalityByNumber(ctx context.Context, bloc
 		log.Error("Failed to get masternodes", "err", err, "len(masternodes)", len(masternodes))
 		return uint(0), err
 	}
-	fmt.Println("before_calling_into_get_finality ")
 	return s.findFinalityOfBlock(ctx, block, masternodes)
 }
 
@@ -694,116 +702,314 @@ func (s *PublicBlockChainAPI) GetMasternodes(ctx context.Context, b *types.Block
 }
 
 // GetCandidateStatus returns status of the given candidate at a specified epochNumber
-func (s *PublicBlockChainAPI) GetCandidateStatus(ctx context.Context, coinbaseAddress common.Address, epochNumber rpc.EpochNumber) (string, error) {
+func (s *PublicBlockChainAPI) GetCandidateStatus(ctx context.Context, coinbaseAddress common.Address, epoch rpc.EpochNumber) (map[string]interface{}, error) {
 	var (
 		block                    *types.Block
+		header                   *types.Header
+		checkpointNumber         rpc.BlockNumber
+		epochNumber              rpc.EpochNumber // if epoch == "latest", print the latest epoch number to epochNumber
 		masternodes, penaltyList []common.Address
+		candidates               []XDPoS.Masternode
 		penalties                []byte
 		err                      error
 	)
-	block = s.b.CurrentBlock()
-	epoch := s.b.ChainConfig().XDPoS.Epoch
-	// TODO: we currently support the latest epoch only
-	//if epochNumber == rpc.LatestEpochNumber {
-	//	block = s.b.CurrentBlock()
-	//} else {
-	//	checkpointNumber := rpc.BlockNumber((uint64(epochNumber) - 1) * epoch)
-	//	if checkpointNumber < 0 {
-	//		checkpointNumber = 0
-	//	}
-	//	block, err = s.b.BlockByNumber(ctx, checkpointNumber)
-	//	if err != nil || block == nil {
-	//		return "", err
-	//	}
-	//}
-	blockNum := block.Number().Uint64()
-	masternodes, err = s.GetMasternodes(ctx, block)
-	if err != nil || len(masternodes) == 0 {
-		log.Error("Failed to get masternodes", "err", err, "len(masternodes)", len(masternodes))
-		return "", err
-	}
-	for _, masternode := range masternodes {
-		if coinbaseAddress == masternode {
-			return statusMasternode, nil
-		}
+
+	result := map[string]interface{}{
+		fieldStatus:   "",
+		fieldCapacity: 0,
+		fieldSuccess:  true,
 	}
 
-	// read smart contract to get candidate list
-	client, err := s.b.GetIPCClient()
-	if err != nil {
-		return "", err
-	}
-	addr := common.HexToAddress(common.MasternodeVotingSMC)
-	validator, err := contractValidator.NewXDCValidator(addr, client)
-	if err != nil {
-		return "", err
-	}
-	opts := new(bind.CallOpts)
-	var (
-		candidateAddresses []common.Address
-		candidates         []XDPoS.Masternode
-	)
+	epochConfig := s.b.ChainConfig().XDPoS.Epoch
 
-	candidateAddresses, err = validator.GetCandidates(opts)
-	if err != nil {
-		return "", err
+	// checkpoint block
+	checkpointNumber, epochNumber = s.GetPreviousCheckpointFromEpoch(ctx, epoch)
+	result[fieldEpoch] = epochNumber.Int64()
+
+	block, err = s.b.BlockByNumber(ctx, checkpointNumber)
+	if err != nil || block == nil { // || checkpointNumber == 0 {
+		result[fieldSuccess] = false
+		return result, err
 	}
-	for _, address := range candidateAddresses {
-		v, err := validator.GetCandidateCap(opts, address)
-		if err != nil {
-			return "", err
-		}
-		if address.String() != "xdc0000000000000000000000000000000000000000" {
-			candidates = append(candidates, XDPoS.Masternode{Address: address, Stake: v})
-		}
+
+	header = block.Header()
+	if header == nil {
+		log.Error("Empty header at checkpoint ", "num", checkpointNumber)
+		return result, errEmptyHeader
 	}
-	// sort candidates by stake descending
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Stake.Cmp(candidates[j].Stake) >= 0
-	})
-		var maxMasternodes int
-	if s.b.ChainConfig().IsTIPIncreaseMasternodes(block.Number()) {
-		maxMasternodes = common.MaxMasternodesV2
+
+	// list of candidates (masternode, slash, propose) at block checkpoint
+	if epoch == rpc.LatestEpochNumber {
+		candidates, err = s.getCandidatesFromSmartContract()
 	} else {
-		maxMasternodes = common.MaxMasternodes
+		statedb, _, err := s.b.StateAndHeaderByNumber(ctx, checkpointNumber)
+		if err != nil {
+			result[fieldSuccess] = false
+			return result, err
+		}
+		candidatesAddresses := state.GetCandidates(statedb)
+		for _, address := range candidatesAddresses {
+			v := state.GetCandidateCap(statedb, address)
+			if address.String() != "0x0000000000000000000000000000000000000000" {
+				candidates = append(candidates, XDPoS.Masternode{Address: address, Stake: v})
+			}
+		}
 	}
-	
-	isTopCandidate := false // is candidates in top 150
-	status := ""
+	if err != nil || len(candidates) == 0 {
+		log.Debug("Candidates list cannot be found", "len(candidates)", len(candidates), "err", err)
+		result[fieldSuccess] = false
+		return result, err
+	}
+
+	isTopCandidate := false
+	// check penalties from checkpoint headers and modify status of a node to SLASHED if it's in top 150 candidates
+	// if it's SLASHED but it's out of top 150, the status should be still PROPOSED
 	for i := 0; i < len(candidates); i++ {
-		if candidates[i].Address == coinbaseAddress {
-			status = statusProposed
-			if i < maxMasternodes {
+		if coinbaseAddress == candidates[i].Address {
+			if i < common.MaxMasternodes {
 				isTopCandidate = true
 			}
+			result[fieldStatus] = statusProposed
+			result[fieldCapacity] = candidates[i].Stake
 			break
 		}
 	}
 	if !isTopCandidate {
-		return status, nil
+		return result, nil
 	}
-	// look up recent checkpoint headers to get penalty list
-	for i := 0; i <= common.LimitPenaltyEpoch; i++ {
-		if blockNum > uint64(i)*epoch {
-			blockCheckpointNumber := rpc.BlockNumber(blockNum - (blockNum % epoch) - (uint64(i) * epoch))
-			blockCheckpoint, err := s.b.BlockByNumber(ctx, blockCheckpointNumber)
-			if err != nil {
-				log.Error("Failed to get block  by number", "num", blockCheckpointNumber, "err", err)
-				continue
-			}
-			penalties = append(penalties, blockCheckpoint.Penalties()...)
+
+	// Second, Find candidates that have masternode status
+	if engine, ok := s.b.GetEngine().(*XDPoS.XDPoS); ok {
+		masternodes = engine.GetMasternodesFromCheckpointHeader(header, block.Number().Uint64(), s.b.ChainConfig().XDPoS.Epoch)
+		if len(masternodes) == 0 {
+			log.Error("Failed to get masternodes", "err", err, "len(masternodes)", len(masternodes), "blockNum", header.Number.Uint64())
+			result[fieldSuccess] = false
+			return result, err
+		}
+	} else {
+		log.Error("Undefined XDPoS consensus engine")
+	}
+	// Set masternode status
+	for _, masternode := range masternodes {
+		if coinbaseAddress == masternode {
+			result[fieldStatus] = statusMasternode
+			return result, nil
 		}
 	}
 
-	if len(penalties) > 0 {
-		penaltyList = common.ExtractAddressFromBytes(penalties)
-		for _, pen := range penaltyList {
-			if coinbaseAddress == pen {
-				return statusSlashed, nil
+	// Third, Get penalties list
+	penalties = append(penalties, header.Penalties...)
+	// check last 5 epochs to find penalize masternodes
+	for i := 1; i <= common.LimitPenaltyEpoch; i++ {
+		if header.Number.Uint64() < epochConfig*uint64(i) {
+			break
+		}
+		blockNum := header.Number.Uint64() - epochConfig*uint64(i)
+		checkpointHeader, err := s.b.HeaderByNumber(ctx, rpc.BlockNumber(blockNum))
+		if checkpointHeader == nil || err != nil {
+			log.Error("Failed to get header by number", "num", blockNum, "err", err)
+			continue
+		}
+		penalties = append(penalties, checkpointHeader.Penalties...)
+	}
+	penaltyList = common.ExtractAddressFromBytes(penalties)
+
+	// map slashing status
+	for _, pen := range penaltyList {
+		if coinbaseAddress == pen {
+			result[fieldStatus] = statusSlashed
+			return result, nil
+		}
+	}
+	return result, nil
+}
+
+// GetCandidates returns status of all candidates at a specified epochNumber
+func (s *PublicBlockChainAPI) GetCandidates(ctx context.Context, epoch rpc.EpochNumber) (map[string]interface{}, error) {
+	var (
+		block            *types.Block
+		header           *types.Header
+		checkpointNumber rpc.BlockNumber
+		epochNumber      rpc.EpochNumber
+		masternodes      []common.Address
+		penaltyList      []common.Address
+		candidates       []XDPoS.Masternode
+		penalties        []byte
+		err              error
+	)
+	result := map[string]interface{}{
+		fieldSuccess: true,
+	}
+	epochConfig := s.b.ChainConfig().XDPoS.Epoch
+	candidatesStatusMap := map[string]map[string]interface{}{}
+
+	checkpointNumber, epochNumber = s.GetPreviousCheckpointFromEpoch(ctx, epoch)
+	result[fieldEpoch] = epochNumber.Int64()
+
+	block, err = s.b.BlockByNumber(ctx, checkpointNumber)
+	if err != nil || block == nil { // || checkpointNumber == 0 {
+		result[fieldSuccess] = false
+		return result, err
+	}
+
+	header = block.Header()
+
+	if header == nil {
+		log.Error("Empty header at checkpoint", "num", checkpointNumber)
+		return result, errEmptyHeader
+	}
+	// list of candidates (masternode, slash, propose) at block checkpoint
+	if epoch == rpc.LatestEpochNumber {
+		candidates, err = s.getCandidatesFromSmartContract()
+	} else {
+		statedb, _, err := s.b.StateAndHeaderByNumber(ctx, checkpointNumber)
+		if err != nil {
+			result[fieldSuccess] = false
+			return result, err
+		}
+		candidatesAddresses := state.GetCandidates(statedb)
+		for _, address := range candidatesAddresses {
+			v := state.GetCandidateCap(statedb, address)
+			if address.String() != "0x0000000000000000000000000000000000000000" {
+				candidates = append(candidates, XDPoS.Masternode{Address: address, Stake: v})
 			}
 		}
 	}
-	return status, nil
+
+	if err != nil || len(candidates) == 0 {
+		log.Debug("Candidates list cannot be found", "len(candidates)", len(candidates), "err", err)
+		result[fieldSuccess] = false
+		return result, err
+	}
+	// First, set all candidate to propose
+	for _, candidate := range candidates {
+		candidatesStatusMap[candidate.Address.String()] = map[string]interface{}{
+			fieldStatus:   statusProposed,
+			fieldCapacity: candidate.Stake,
+		}
+	}
+
+	// Second, Find candidates that have masternode status
+	if engine, ok := s.b.GetEngine().(*XDPoS.XDPoS); ok {
+		masternodes = engine.GetMasternodesFromCheckpointHeader(header, block.Number().Uint64(), s.b.ChainConfig().XDPoS.Epoch)
+		if len(masternodes) == 0 {
+			log.Error("Failed to get masternodes", "err", err, "len(masternodes)", len(masternodes), "blockNum", header.Number.Uint64())
+			result[fieldSuccess] = false
+			return result, err
+		}
+	} else {
+		log.Error("Undefined XDPoS consensus engine")
+	}
+	// Set masternode status
+	for _, masternode := range masternodes {
+		if candidatesStatusMap[masternode.String()] != nil {
+			candidatesStatusMap[masternode.String()][fieldStatus] = statusMasternode
+		}
+	}
+
+	// Third, Get penalties list
+	penalties = append(penalties, header.Penalties...)
+	// check last 5 epochs to find penalize masternodes
+	for i := 1; i <= common.LimitPenaltyEpoch; i++ {
+		if header.Number.Uint64() < epochConfig*uint64(i) {
+			break
+		}
+		blockNum := header.Number.Uint64() - epochConfig*uint64(i)
+		checkpointHeader, err := s.b.HeaderByNumber(ctx, rpc.BlockNumber(blockNum))
+		if checkpointHeader == nil || err != nil {
+			log.Error("Failed to get header by number", "num", blockNum, "err", err)
+			continue
+		}
+		penalties = append(penalties, checkpointHeader.Penalties...)
+	}
+	// map slashing status
+	if len(penalties) == 0 {
+		result[fieldCandidates] = candidatesStatusMap
+		return result, nil
+	}
+	penaltyList = common.ExtractAddressFromBytes(penalties)
+
+	var topCandidates []XDPoS.Masternode
+	if len(candidates) > common.MaxMasternodes {
+		topCandidates = candidates[:common.MaxMasternodes]
+	} else {
+		topCandidates = candidates
+	}
+	// check penalties from checkpoint headers and modify status of a node to SLASHED if it's in top 150 candidates
+	// if it's SLASHED but it's out of top 150, the status should be still PROPOSED
+	for _, pen := range penaltyList {
+		for _, candidate := range topCandidates {
+			if candidate.Address == pen && candidatesStatusMap[pen.String()] != nil {
+				candidatesStatusMap[pen.String()][fieldStatus] = statusSlashed
+			}
+			penalties = append(penalties, block.Penalties()...)
+		}
+	}
+
+	// update result
+	result[fieldCandidates] = candidatesStatusMap
+	return result, nil
+}
+
+// GetPreviousCheckpointFromEpoch returns header of the previous checkpoint
+func (s *PublicBlockChainAPI) GetPreviousCheckpointFromEpoch(ctx context.Context, epochNum rpc.EpochNumber) (rpc.BlockNumber, rpc.EpochNumber) {
+	var checkpointNumber uint64
+	epoch := s.b.ChainConfig().XDPoS.Epoch
+
+	if epochNum == rpc.LatestEpochNumber {
+		blockNumer := s.b.CurrentBlock().Number().Uint64()
+		diff := blockNumer % epoch
+		// checkpoint number
+		checkpointNumber = blockNumer - diff
+		epochNum = rpc.EpochNumber(checkpointNumber / epoch)
+		if diff > 0 {
+			epochNum += 1
+		}
+	} else if epochNum < 2 {
+		checkpointNumber = 0
+	} else {
+		checkpointNumber = epoch * (uint64(epochNum) - 1)
+	}
+	return rpc.BlockNumber(checkpointNumber), epochNum
+}
+
+// getCandidatesFromSmartContract returns all candidates with their capacities at the current time
+func (s *PublicBlockChainAPI) getCandidatesFromSmartContract() ([]XDPoS.Masternode, error) {
+	client, err := s.b.GetIPCClient()
+	if err != nil {
+		return []XDPoS.Masternode{}, err
+	}
+
+	addr := common.HexToAddress(common.MasternodeVotingSMC)
+	validator, err := contractValidator.NewXDCValidator(addr, client)
+	if err != nil {
+		return []XDPoS.Masternode{}, err
+	}
+
+	opts := new(bind.CallOpts)
+	candidates, err := validator.GetCandidates(opts)
+	if err != nil {
+		return []XDPoS.Masternode{}, err
+	}
+
+	var candidatesWithStakeInfo []XDPoS.Masternode
+
+	for _, candidate := range candidates {
+		v, err := validator.GetCandidateCap(opts, candidate)
+		if err != nil {
+			return []XDPoS.Masternode{}, err
+		}
+		if candidate.String() != "0x0000000000000000000000000000000000000000" {
+			candidatesWithStakeInfo = append(candidatesWithStakeInfo, XDPoS.Masternode{Address: candidate, Stake: v})
+		}
+
+		if len(candidatesWithStakeInfo) > 0 {
+			sort.Slice(candidatesWithStakeInfo, func(i, j int) bool {
+				return candidatesWithStakeInfo[i].Stake.Cmp(candidatesWithStakeInfo[j].Stake) >= 0
+			})
+		}
+	}
+	return candidatesWithStakeInfo, nil
 }
 
 // CallArgs represents the arguments for a call.
@@ -1066,12 +1272,11 @@ func (s *PublicBlockChainAPI) findNearestSignedBlock(ctx context.Context, b *typ
 	signedBlockNumber := blockNumber + (common.MergeSignRange - (blockNumber % common.MergeSignRange))
 	latestBlockNumber := s.b.CurrentBlock().Number()
 
-	if signedBlockNumber >= latestBlockNumber.Uint64() || !s.b.ChainConfig().IsTIP2019(b.Number()) {
+	if signedBlockNumber >= latestBlockNumber.Uint64() || !s.b.ChainConfig().IsTIPSigning(b.Number()) {
 		signedBlockNumber = blockNumber
 	}
 
-	// Get block epoc latest.
-	// TODO: check if this check needed or not
+	// Get block epoc latest
 	checkpointNumber := signedBlockNumber - (signedBlockNumber % s.b.ChainConfig().XDPoS.Epoch)
 	checkpointBlock, _ := s.b.BlockByNumber(ctx, rpc.BlockNumber(checkpointNumber))
 
@@ -1086,7 +1291,6 @@ func (s *PublicBlockChainAPI) findNearestSignedBlock(ctx context.Context, b *typ
 /*
 	findFinalityOfBlock return finality of a block
 	Use blocksHashCache for to keep track - refer core/blockchain.go for more detail
-	TODO: this function need refactoring because the content is not same abstraction
 */
 func (s *PublicBlockChainAPI) findFinalityOfBlock(ctx context.Context, b *types.Block, masternodes []common.Address) (uint, error) {
 	engine, _ := s.b.GetEngine().(*XDPoS.XDPoS)
@@ -1154,7 +1358,7 @@ func (s *PublicBlockChainAPI) findFinalityOfBlock(ctx context.Context, b *types.
 	Extract signers from block
 */
 func (s *PublicBlockChainAPI) getSigners(ctx context.Context, block *types.Block, engine *XDPoS.XDPoS) ([]common.Address, error) {
-	client, err := s.b.GetIPCClient()
+	var err error
 	var filterSigners []common.Address
 	var signers []common.Address
 	blockNumber := block.Number().Uint64()
@@ -1164,11 +1368,7 @@ func (s *PublicBlockChainAPI) getSigners(ctx context.Context, block *types.Block
 	checkpointBlock, _ := s.b.BlockByNumber(ctx, rpc.BlockNumber(checkpointNumber))
 
 	masternodes := engine.GetMasternodesFromCheckpointHeader(checkpointBlock.Header(), blockNumber, s.b.ChainConfig().XDPoS.Epoch)
-	if s.b.ChainConfig().IsTIPSigning(checkpointBlock.Number()) {
-		signers, err = GetSignersFromBlocks(s.b, block.NumberU64(), block.Hash(), masternodes)
-	} else {
-		signers, err = contracts.GetSignersByExecutingEVM(common.HexToAddress(common.BlockSigners), client, block.Hash())
-	}
+	signers, err = GetSignersFromBlocks(s.b, block.NumberU64(), block.Hash(), masternodes)
 	if err != nil {
 		log.Error("Fail to get signers from block signer SC.", "error", err)
 		return nil, err
@@ -1184,7 +1384,6 @@ func (s *PublicBlockChainAPI) getSigners(ctx context.Context, block *types.Block
 				filterSigners = append(filterSigners, masternode)
 				break
 			}
-			
 		}
 	}
 	return filterSigners, nil
@@ -1890,4 +2089,64 @@ func GetSignersFromBlocks(b Backend, blockNumber uint64, blockHash common.Hash, 
 		}
 	}
 	return addrs, nil
+}
+
+// GetStakerROI Estimate ROI for stakers using the last epoc reward
+// then multiple by epoch per year, if the address is not masternode of last epoch - return 0
+// Formular:
+// 		ROI = average_latest_epoch_reward_for_voters*number_of_epoch_per_year/latest_total_cap*100
+func (s *PublicBlockChainAPI) GetStakerROI() float64 {
+	blockNumber := s.b.CurrentBlock().Number().Uint64()
+	lastCheckpointNumber := blockNumber - (blockNumber % s.b.ChainConfig().XDPoS.Epoch) - s.b.ChainConfig().XDPoS.Epoch // calculate for 2 epochs ago
+	totalCap := new(big.Int).SetUint64(0)
+
+	mastersCap := s.b.GetMasternodesCap(lastCheckpointNumber)
+	if mastersCap == nil {
+		return 0
+	}
+
+	masternodeReward := new(big.Int).Mul(new(big.Int).SetUint64(s.b.ChainConfig().XDPoS.Reward), new(big.Int).SetUint64(params.Ether))
+
+	for _, cap := range mastersCap {
+		totalCap.Add(totalCap, cap)
+	}
+
+	holderReward := new(big.Int).Div(masternodeReward, new(big.Int).SetUint64(2))
+	EpochPerYear := 365 * 86400 / s.b.GetEpochDuration().Uint64()
+	voterRewardAYear := new(big.Int).Mul(holderReward, new(big.Int).SetUint64(EpochPerYear))
+	return 100.0 / float64(totalCap.Div(totalCap, voterRewardAYear).Uint64())
+}
+
+// GetStakerROIMasternode Estimate ROI for stakers of a specific masternode using the last epoc reward
+// then multiple by epoch per year, if the address is not masternode of last epoch - return 0
+// Formular:
+// 		ROI = latest_epoch_reward_for_voters*number_of_epoch_per_year/latest_total_cap*100
+func (s *PublicBlockChainAPI) GetStakerROIMasternode(masternode common.Address) float64 {
+	votersReward := s.b.GetVotersRewards(masternode)
+	if votersReward == nil {
+		return 0
+	}
+
+	masternodeReward := new(big.Int).SetUint64(0) // this includes all reward for this masternode
+	voters := []common.Address{}
+	for voter, reward := range votersReward {
+		voters = append(voters, voter)
+		masternodeReward.Add(masternodeReward, reward)
+	}
+
+	blockNumber := s.b.CurrentBlock().Number().Uint64()
+	lastCheckpointNumber := blockNumber - blockNumber%s.b.ChainConfig().XDPoS.Epoch
+	totalCap := new(big.Int).SetUint64(0)
+	votersCap := s.b.GetVotersCap(new(big.Int).SetUint64(lastCheckpointNumber), masternode, voters)
+
+	for _, cap := range votersCap {
+		totalCap.Add(totalCap, cap)
+	}
+
+	// holder reward = 50% total reward of a masternode
+	holderReward := new(big.Int).Div(masternodeReward, new(big.Int).SetUint64(2))
+	EpochPerYear := 365 * 86400 / s.b.GetEpochDuration().Uint64()
+	voterRewardAYear := new(big.Int).Mul(holderReward, new(big.Int).SetUint64(EpochPerYear))
+
+	return 100.0 / float64(totalCap.Div(totalCap, voterRewardAYear).Uint64())
 }

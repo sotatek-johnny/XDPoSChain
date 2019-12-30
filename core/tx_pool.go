@@ -220,7 +220,7 @@ type TxPool struct {
 
 	homestead        bool
 	IsSigner         func(address common.Address) bool
-	xrc21FeeCapacity map[common.Address]*big.Int
+	XRC21FeeCapacity map[common.Address]*big.Int
 }
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
@@ -241,7 +241,7 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 		all:              make(map[common.Hash]*types.Transaction),
 		chainHeadCh:      make(chan ChainHeadEvent, chainHeadChanSize),
 		gasPrice:         new(big.Int).SetUint64(config.PriceLimit),
-		xrc21FeeCapacity: map[common.Address]*big.Int{},
+		XRC21FeeCapacity: map[common.Address]*big.Int{},
 	}
 	pool.locals = newAccountSet(pool.signer)
 	pool.priced = newTxPricedList(&pool.all)
@@ -419,7 +419,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 		return
 	}
 	pool.currentState = statedb
-	pool.xrc21FeeCapacity = state.GetXRC21FeeCapacityFromStateWithCache(newHead.Root, statedb)
+	pool.XRC21FeeCapacity = state.GetXRC21FeeCapacityFromStateWithCache(newHead.Root, statedb)
 	pool.pendingState = state.ManageState(statedb)
 	pool.currentMaxGas = newHead.GasLimit
 
@@ -621,7 +621,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	cost := tx.Cost()
 	minGasPrice := common.MinGasPrice
 	if tx.To() != nil {
-		if value, ok := pool.xrc21FeeCapacity[*tx.To()]; ok {
+		if value, ok := pool.XRC21FeeCapacity[*tx.To()]; ok {
 			balance = value
 			if !state.ValidateXRC21Tx(pool.pendingState.StateDB, from, *tx.To(), tx.Data()) {
 				return ErrInsufficientFunds
@@ -655,10 +655,10 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		}
 	}
 
-	// minGasDeploySMC := new(big.Int).Mul(new(big.Int).SetUint64(10), new(big.Int).SetUint64(params.Ether))
-	// if tx.To() == nil && (tx.Cost().Cmp(minGasDeploySMC) < 0 || tx.GasPrice().Cmp(new(big.Int).SetUint64(10000*params.Shannon)) < 0) {
-	// 	return ErrMinDeploySMC
-	// }
+	minGasDeploySMC := new(big.Int).Mul(new(big.Int).SetUint64(10), new(big.Int).SetUint64(params.Ether))
+	if tx.To() == nil && (tx.Cost().Cmp(minGasDeploySMC) < 0 || tx.GasPrice().Cmp(new(big.Int).SetUint64(10000*params.Shannon)) < 0) {
+		return ErrMinDeploySMC
+	}
 
 	return nil
 }
@@ -1038,7 +1038,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			pool.priced.Removed()
 		}
 		// Drop all transactions that are too costly (low balance or out of gas)
-		drops, _ := list.Filter(pool.currentState.GetBalance(addr), pool.currentMaxGas, pool.xrc21FeeCapacity)
+		drops, _ := list.Filter(pool.currentState.GetBalance(addr), pool.currentMaxGas, pool.XRC21FeeCapacity)
 		for _, tx := range drops {
 			hash := tx.Hash()
 			log.Trace("Removed unpayable queued transaction", "hash", hash)
@@ -1196,7 +1196,7 @@ func (pool *TxPool) demoteUnexecutables() {
 			pool.priced.Removed()
 		}
 		// Drop all transactions that are too costly (low balance or out of gas), and queue any invalids back for later
-		drops, invalids := list.Filter(pool.currentState.GetBalance(addr), pool.currentMaxGas, pool.xrc21FeeCapacity)
+		drops, invalids := list.Filter(pool.currentState.GetBalance(addr), pool.currentMaxGas, pool.XRC21FeeCapacity)
 		for _, tx := range drops {
 			hash := tx.Hash()
 			log.Trace("Removed unpayable pending transaction", "hash", hash)

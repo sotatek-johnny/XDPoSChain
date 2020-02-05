@@ -60,7 +60,7 @@ func testTransferXRC21TokenWithAccountNoXDC() {
 		fmt.Println(err, client)
 	}
 
-	// access to address which received token XRC20 but dont have tomo
+	// access to address which received token XRC20 but dont have XDC
 	nonce, _ := client.NonceAt(context.Background(), simulation.AirdropAddr, nil)
 	airDropAccount := bind.NewKeyedTransactor(simulation.AirdropKey)
 	airDropAccount.Nonce = big.NewInt(int64(nonce))
@@ -186,9 +186,9 @@ func main() {
 		airDropTokenToAccountNoXDC()
 		fmt.Println("Finish airdrop token to a account")
 		testTransferXRC21TokenWithAccountNoXDC()
-		fmt.Println("Finish transfer XRC21 token with a account no tomo")
+		fmt.Println("Finish transfer XRC21 token with a account no XDC")
 		testTransferXRC21Fail()
-		fmt.Println("Finish testing ! Success transferAmount token XRC20 with a account no tomo")
+		fmt.Println("Finish testing ! Success transferAmount token XRC20 with a account no XDC")
 	}
 	fmt.Println(common.PrettyDuration(time.Since(start)))
 }

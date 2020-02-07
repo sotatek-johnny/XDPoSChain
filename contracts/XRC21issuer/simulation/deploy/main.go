@@ -40,7 +40,7 @@ func main() {
 	auth.Nonce = big.NewInt(int64(nonce + 1))
 
 	// init XRC20
-	XRC21TokenAddr, XRC21Token, err := XRC21issuer.DeployXRC21(auth, client, "TEST", "TOMO", 18, simulation.Cap, simulation.Fee)
+	XRC21TokenAddr, XRC21Token, err := XRC21issuer.DeployXRC21(auth, client, "TEST", "XDC", 18, simulation.Cap, simulation.Fee)
 	if err != nil {
 		log.Fatal(err)
 	}

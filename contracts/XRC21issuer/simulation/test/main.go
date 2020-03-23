@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/contracts/XRC21issuer"
 	"github.com/ethereum/go-ethereum/contracts/XRC21issuer/simulation"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -27,7 +29,7 @@ func airDropTokenToAccountNoXDC() {
 	mainAccount.Nonce = big.NewInt(int64(nonce))
 	mainAccount.Value = big.NewInt(0)      // in wei
 	mainAccount.GasLimit = uint64(4000000) // in units
-	mainAccount.GasPrice = big.NewInt(21000)
+	mainAccount.GasPrice = big.NewInt(0).Mul(common.XRC21GasPrice,big.NewInt(2))
 	XRC21Instance, _ := XRC21issuer.NewXRC21(mainAccount, XRC21TokenAddr, client)
 	XRC21IssuerInstance, _ := XRC21issuer.NewXRC21Issuer(mainAccount, common.XRC21IssuerSMC, client)
 	// air drop token
@@ -40,11 +42,18 @@ func airDropTokenToAccountNoXDC() {
 	fmt.Println("wait 10s to airdrop success ", tx.Hash().Hex())
 	time.Sleep(10 * time.Second)
 
-	receipt, err := client.TransactionReceipt(context.Background(), tx.Hash())
-	if err != nil || receipt == nil {
+	_, receiptRpc, err := client.GetTransactionReceiptResult(context.Background(), tx.Hash())
+	receipt := map[string]interface{}{}
+	err = json.Unmarshal(receiptRpc, &receipt)
+	if err != nil {
 		log.Fatal("can't transaction's receipt ", err, "hash", tx.Hash().Hex())
 	}
-	remainFee = big.NewInt(0).Sub(remainFee, big.NewInt(0).SetUint64(receipt.GasUsed))
+	fee := big.NewInt(0).SetUint64(hexutil.MustDecodeUint64(receipt["gasUsed"].(string)))
+	if hexutil.MustDecodeUint64(receipt["blockNumber"].(string)) > common.TIPXRC21Fee.Uint64() {
+		fee = fee.Mul(fee, common.XRC21GasPrice)
+	}
+	fmt.Println("fee", fee.Uint64(), "number", hexutil.MustDecodeUint64(receipt["blockNumber"].(string)))
+	remainFee = big.NewInt(0).Sub(remainFee, fee)
 	//check balance fee
 	balanceIssuerFee, err := XRC21IssuerInstance.GetTokenCapacity(XRC21TokenAddr)
 	if err != nil || balanceIssuerFee.Cmp(remainFee) != 0 {
@@ -66,7 +75,7 @@ func testTransferXRC21TokenWithAccountNoXDC() {
 	airDropAccount.Nonce = big.NewInt(int64(nonce))
 	airDropAccount.Value = big.NewInt(0)      // in wei
 	airDropAccount.GasLimit = uint64(4000000) // in units
-	airDropAccount.GasPrice = big.NewInt(21000)
+	airDropAccount.GasPrice = big.NewInt(0).Mul(common.XRC21GasPrice,big.NewInt(2))
 	XRC21Instance, _ := XRC21issuer.NewXRC21(airDropAccount, XRC21TokenAddr, client)
 	XRC21IssuerInstance, _ := XRC21issuer.NewXRC21Issuer(airDropAccount, common.XRC21IssuerSMC, client)
 
@@ -97,11 +106,18 @@ func testTransferXRC21TokenWithAccountNoXDC() {
 		log.Fatal("check balance after fail transferAmount in tr21: ", err, "get", balance, "wanted", remainAirDrop)
 	}
 
-	receipt, err := client.TransactionReceipt(context.Background(), tx.Hash())
+	_, receiptRpc, err := client.GetTransactionReceiptResult(context.Background(), tx.Hash())
+	receipt := map[string]interface{}{}
+	err = json.Unmarshal(receiptRpc, &receipt)
 	if err != nil {
 		log.Fatal("can't transaction's receipt ", err, "hash", tx.Hash().Hex())
 	}
-	remainFee = big.NewInt(0).Sub(remainFee, big.NewInt(0).SetUint64(receipt.GasUsed))
+	fee := big.NewInt(0).SetUint64(hexutil.MustDecodeUint64(receipt["gasUsed"].(string)))
+	if hexutil.MustDecodeUint64(receipt["blockNumber"].(string)) > common.TIPXRC21Fee.Uint64() {
+		fee = fee.Mul(fee, common.XRC21GasPrice)
+	}
+	fmt.Println("fee", fee.Uint64(), "number", hexutil.MustDecodeUint64(receipt["blockNumber"].(string)))
+	remainFee = big.NewInt(0).Sub(remainFee, fee)
 	//check balance fee
 	balanceIssuerFee, err := XRC21IssuerInstance.GetTokenCapacity(XRC21TokenAddr)
 	if err != nil || balanceIssuerFee.Cmp(remainFee) != 0 {
@@ -123,7 +139,7 @@ func testTransferXRC21Fail() {
 	airDropAccount.Nonce = big.NewInt(int64(nonce))
 	airDropAccount.Value = big.NewInt(0)      // in wei
 	airDropAccount.GasLimit = uint64(4000000) // in units
-	airDropAccount.GasPrice = big.NewInt(21000)
+	airDropAccount.GasPrice = big.NewInt(0).Mul(common.XRC21GasPrice,big.NewInt(2))
 	XRC21Instance, _ := XRC21issuer.NewXRC21(airDropAccount, XRC21TokenAddr, client)
 	XRC21IssuerInstance, _ := XRC21issuer.NewXRC21Issuer(airDropAccount, common.XRC21IssuerSMC, client)
 	balanceIssuerFee, err := XRC21IssuerInstance.GetTokenCapacity(XRC21TokenAddr)
@@ -151,10 +167,7 @@ func testTransferXRC21Fail() {
 		log.Fatal("check balance after fail transferAmount in tr21: ", err, "get", balance, "wanted", airDropBalanceBefore)
 	}
 
-	receipt, err := client.TransactionReceipt(context.Background(), tx.Hash())
-	if err != nil {
-		log.Fatal("can't transaction's receipt ", err, "hash", tx.Hash().Hex())
-	}
+
 	ownerBalance = big.NewInt(0).Add(ownerBalance, minFee)
 	//check balance fee
 	balance, err = XRC21Instance.BalanceOf(simulation.MainAddr)
@@ -162,7 +175,18 @@ func testTransferXRC21Fail() {
 		log.Fatal("can't get balance token fee in  smart contract: ", err, "got", balanceIssuerFee, "wanted", remainFee)
 	}
 
-	remainFee = big.NewInt(0).Sub(remainFee, big.NewInt(0).SetUint64(receipt.GasUsed))
+	_, receiptRpc, err := client.GetTransactionReceiptResult(context.Background(), tx.Hash())
+	receipt := map[string]interface{}{}
+	err = json.Unmarshal(receiptRpc, &receipt)
+	if err != nil {
+		log.Fatal("can't transaction's receipt ", err, "hash", tx.Hash().Hex())
+	}
+	fee := big.NewInt(0).SetUint64(hexutil.MustDecodeUint64(receipt["gasUsed"].(string)))
+	if hexutil.MustDecodeUint64(receipt["blockNumber"].(string)) > common.TIPXRC21Fee.Uint64() {
+		fee = fee.Mul(fee, common.XRC21GasPrice)
+	}
+	fmt.Println("fee", fee.Uint64(), "number", hexutil.MustDecodeUint64(receipt["blockNumber"].(string)))
+	remainFee = big.NewInt(0).Sub(remainFee, fee)
 	//check balance fee
 	balanceIssuerFee, err = XRC21IssuerInstance.GetTokenCapacity(XRC21TokenAddr)
 	if err != nil || balanceIssuerFee.Cmp(remainFee) != 0 {

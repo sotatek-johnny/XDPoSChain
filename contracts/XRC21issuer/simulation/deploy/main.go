@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/contracts/XRC21issuer"
 	"github.com/ethereum/go-ethereum/contracts/XRC21issuer/simulation"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -51,10 +52,10 @@ func main() {
 
 	XRC21Issuer.TransactOpts.Nonce = big.NewInt(int64(nonce + 2))
 	XRC21Issuer.TransactOpts.Value = simulation.MinApply
-	XRC21Issuer.TransactOpts.GasPrice = big.NewInt(21000)
-	XRC21Token.TransactOpts.GasPrice = big.NewInt(21000)
+	XRC21Issuer.TransactOpts.GasPrice = big.NewInt(common.DefaultMinGasPrice)
+	XRC21Token.TransactOpts.GasPrice = big.NewInt(common.DefaultMinGasPrice)
 	XRC21Token.TransactOpts.GasLimit = uint64(4000000)
-	auth.GasPrice = big.NewInt(21000)
+	auth.GasPrice = big.NewInt(common.DefaultMinGasPrice)
 	// get balance init XRC21 smart contract
 	balance, err := XRC21Token.BalanceOf(simulation.MainAddr)
 	if err != nil || balance.Cmp(simulation.Cap) != 0 {

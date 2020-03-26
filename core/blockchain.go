@@ -580,21 +580,35 @@ func (bc *BlockChain) HasBlock(hash common.Hash, number uint64) bool {
 	return ok
 }
 
-// HasState checks if state trie is fully present in the database or not.
-func (bc *BlockChain) HasState(hash common.Hash) bool {
-	_, err := bc.stateCache.OpenTrie(hash)
-	return err == nil
+// HasFullState checks if state trie is fully present in the database or not.
+func (bc *BlockChain) HasFullState(block *types.Block) bool {
+	_, err := bc.stateCache.OpenTrie(block.Root())
+	if err != nil {
+		return false
+	}
+	engine, _ := bc.Engine().(*XDPoS.XDPoS)
+	if bc.Config().IsXIPXDCX(block.Number()) && engine != nil && block.NumberU64() > bc.chainConfig.XDPoS.Epoch {
+		tradingService := engine.GetXDCXService()
+		lendingService := engine.GetLendingService()
+		if tradingService != nil && !tradingService.HasTradingState(block) {
+			return false
+		}
+		if lendingService != nil && !lendingService.HasLendingState(block) {
+			return false
+		}
+	}
+	return true
 }
 
-// HasBlockAndState checks if a block and associated state trie is fully present
+// HasBlockAndFullState checks if a block and associated state trie is fully present
 // in the database or not, caching it if present.
-func (bc *BlockChain) HasBlockAndState(hash common.Hash, number uint64) bool {
+func (bc *BlockChain) HasBlockAndFullState(hash common.Hash, number uint64) bool {
 	// Check first that the block itself is known
 	block := bc.GetBlock(hash, number)
 	if block == nil {
 		return false
 	}
-	return bc.HasState(block.Root())
+	return bc.HasFullState(block)
 }
 
 // GetBlock retrieves a block from the database by hash and number,
@@ -1177,7 +1191,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			var winner []*types.Block
 
 			parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
-			for !bc.HasState(parent.Root()) {
+			for !bc.HasFullState(parent) {
 				winner = append(winner, parent)
 				parent = bc.GetBlock(parent.ParentHash(), parent.NumberU64()-1)
 			}
@@ -1358,7 +1372,7 @@ func (bc *BlockChain) getResultBlock(block *types.Block, verifiedM2 bool) (*Resu
 		var winner []*types.Block
 
 		parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
-		for !bc.HasState(parent.Root()) {
+		for !bc.HasFullState(parent) {
 			winner = append(winner, parent)
 			parent = bc.GetBlock(parent.ParentHash(), parent.NumberU64()-1)
 		}
@@ -1448,7 +1462,7 @@ func (bc *BlockChain) insertBlock(block *types.Block) ([]interface{}, []*types.L
 	// Write the block to the chain and get the status.
 	bc.chainmu.Lock()
 	defer bc.chainmu.Unlock()
-	if bc.HasBlockAndState(block.Hash(), block.NumberU64()) {
+	if bc.HasBlockAndFullState(block.Hash(), block.NumberU64()) {
 		return events, coalescedLogs, nil
 	}
 	status, err := bc.WriteBlockWithState(block, result.receipts, result.state)

@@ -43,9 +43,9 @@ func TestFeeTxWithXRC21Token(t *testing.T) {
 	}
 	contractBackend.Commit()
 	cap := big.NewInt(0).Mul(big.NewInt(10000000), big.NewInt(10000000000000))
-	fee := big.NewInt(100)
+	XRC21fee := big.NewInt(100)
 	//  deploy a XRC21 SMC
-	XRC21TokenAddr, XRC21, err := DeployXRC21(transactOpts, contractBackend, "TEST", "XDC", 18, cap, fee)
+	XRC21TokenAddr, XRC21, err := DeployXRC21(transactOpts, contractBackend, "TEST", "XDC", 18, cap, XRC21fee)
 	if err != nil {
 		t.Fatal("can't deploy smart contract: ", err)
 	}
@@ -81,7 +81,11 @@ func TestFeeTxWithXRC21Token(t *testing.T) {
 	if err != nil {
 		t.Fatal("can't transaction's receipt ", err, "hash", tx.Hash())
 	}
-	remainFee := big.NewInt(0).Sub(minApply, big.NewInt(0).SetUint64(receipt.GasUsed))
+	fee := big.NewInt(0).SetUint64(receipt.GasUsed)
+	if receipt.Logs[0].BlockNumber > common.TIPXRC21Fee.Uint64() {
+		fee = fee.Mul(fee, common.XRC21GasPrice)
+	}
+	remainFee := big.NewInt(0).Sub(minApply, fee)
 
 	// check balance XRC21 again
 	balance, err = XRC21.BalanceOf(airdropAddr)
@@ -102,7 +106,7 @@ func TestFeeTxWithXRC21Token(t *testing.T) {
 
 	// access to address which received token XRC21 but dont have XDC
 	key1TransactOpts := bind.NewKeyedTransactor(airdropKey)
-	key1Trc20, _ := NewXRC21(key1TransactOpts, XRC21TokenAddr, contractBackend)
+	key1Xrc20, _ := NewXRC21(key1TransactOpts, XRC21TokenAddr, contractBackend)
 
 	transferAmount := big.NewInt(100000)
 	// execute transfer XRC to other address
@@ -112,25 +116,28 @@ func TestFeeTxWithXRC21Token(t *testing.T) {
 	}
 	contractBackend.Commit()
 
-	receipt, err = contractBackend.TransactionReceipt(nil, tx.Hash())
-	if err != nil {
-		t.Fatal("can't transaction's receipt ", err, "hash", tx.Hash())
-	}
-	remainFee = big.NewInt(0).Sub(remainFee, big.NewInt(0).SetUint64(receipt.GasUsed))
-
 	balance, err = XRC21.BalanceOf(subAddr)
 	if err != nil || balance.Cmp(transferAmount) != 0 {
 		t.Fatal("check balance after fail transfer in tr20: ", err, "get", balance, "transfer", transferAmount)
 	}
 
 	remainAirDrop := big.NewInt(0).Sub(airDropAmount, transferAmount)
-	remainAirDrop = remainAirDrop.Sub(remainAirDrop, fee)
+	remainAirDrop = remainAirDrop.Sub(remainAirDrop, XRC21fee)
 	// check balance XRC21 again
 	balance, err = XRC21.BalanceOf(airdropAddr)
 	if err != nil || balance.Cmp(remainAirDrop) != 0 {
-		t.Fatal("check balance after fail transfer in tr20: ", err, "get", balance, "transfer", remainAirDrop)
+		t.Fatal("check balance after fail transfer in tr20: ", err, "get", balance, "wanted", remainAirDrop)
 	}
 
+	receipt, err = contractBackend.TransactionReceipt(nil, tx.Hash())
+	if err != nil {
+		t.Fatal("can't transaction's receipt ", err, "hash", tx.Hash())
+	}
+	fee = big.NewInt(0).SetUint64(receipt.GasUsed)
+	if receipt.Logs[0].BlockNumber > common.TIPXRC21Fee.Uint64() {
+		fee = fee.Mul(fee, common.XRC21GasPrice)
+	}
+	remainFee = big.NewInt(0).Sub(remainFee, fee)
 	//check balance fee
 	balanceIssuerFee, err = XRC21Issuer.GetTokenCapacity(XRC21TokenAddr)
 	if err != nil || balanceIssuerFee.Cmp(remainFee) != 0 {

@@ -21,7 +21,7 @@ var Modules = map[string]string{
 	"admin":      Admin_JS,
 	"chequebook": Chequebook_JS,
 	"clique":     Clique_JS,
-	"XDPoS":       XDPoS_JS,
+	"XDPoS":      XDPoS_JS,
 	"debug":      Debug_JS,
 	"eth":        Eth_JS,
 	"miner":      Miner_JS,
@@ -431,6 +431,11 @@ const Eth_JS = `
 web3._extend({
 	property: 'eth',
 	methods: [
+		new web3._extend.Method({
+			name: 'chainId',
+			call: 'eth_chainId',
+			params: 0
+		}),
 		new web3._extend.Method({
 			name: 'sign',
 			call: 'eth_sign',

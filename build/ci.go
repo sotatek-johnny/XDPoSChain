@@ -60,9 +60,11 @@ var (
 		executablePath("geth"),
 		executablePath("puppeth"),
 		executablePath("rlpdump"),
-		executablePath("swarm"),
 		executablePath("wnode"),
 	}
+
+	// Packages to be cross-compiled by the xgo command
+	allCrossCompiledArchiveFiles = allToolsArchiveFiles
 )
 
 var GOBIN, _ = filepath.Abs(filepath.Join("build", "bin"))
@@ -214,9 +216,7 @@ func goToolArch(arch string, cc string, subcmd string, args ...string) *exec.Cmd
 // "tests" also includes static analysis tools such as vet.
 
 func doTest(cmdline []string) {
-	var (
-		coverage = flag.Bool("coverage", false, "Whether to record code coverage")
-	)
+	coverage := flag.Bool("coverage", false, "Whether to record code coverage")
 	flag.CommandLine.Parse(cmdline)
 	env := build.Env()
 
@@ -226,14 +226,11 @@ func doTest(cmdline []string) {
 	}
 	packages = build.ExpandPackagesNoVendor(packages)
 
-	// Run analysis tools before the tests.
-	build.MustRun(goTool("vet", packages...))
-
 	// Run the actual tests.
-	gotest := goTool("test", buildFlags(env)...)
 	// Test a single package at a time. CI builders are slow
 	// and some tests run into timeouts under load.
-	gotest.Args = append(gotest.Args, "-p", "1")
+	gotest := goTool("test", buildFlags(env)...)
+	gotest.Args = append(gotest.Args, "-p", "1", "-timeout", "5m")
 	if *coverage {
 		gotest.Args = append(gotest.Args, "-covermode=atomic", "-cover")
 	}
@@ -257,7 +254,11 @@ func doLint(cmdline []string) {
 	// Run fast linters batched together
 	configs := []string{
 		"--vendor",
+		"--tests",
+		"--deadline=2m",
 		"--disable-all",
+		"--enable=goimports",
+		"--enable=varcheck",
 		"--enable=vet",
 		"--enable=gofmt",
 		"--enable=misspell",
@@ -268,7 +269,7 @@ func doLint(cmdline []string) {
 
 	// Run slow linters one by one
 	for _, linter := range []string{"unconvert", "gosimple"} {
-		configs = []string{"--vendor", "--deadline=10m", "--disable-all", "--enable=" + linter}
+		configs = []string{"--vendor", "--tests", "--deadline=10m", "--disable-all", "--enable=" + linter}
 		build.MustRunCommand(filepath.Join(GOBIN, "gometalinter.v2"), append(configs, packages...)...)
 	}
 }
@@ -291,7 +292,7 @@ func doXgo(cmdline []string) {
 
 	if *alltools {
 		args = append(args, []string{"--dest", GOBIN}...)
-		for _, res := range allToolsArchiveFiles {
+		for _, res := range allCrossCompiledArchiveFiles {
 			if strings.HasPrefix(res, GOBIN) {
 				// Binary tool found, cross build it explicitly
 				args = append(args, "./"+filepath.Join("cmd", filepath.Base(res)))
